@@ -1,0 +1,35 @@
+import pandas as pd
+
+def find_missing_urls(file1, file2):
+    # Read the TSV files, assuming the first row is a header and only reading the 'URL' column
+    df1 = pd.read_csv(file1, sep='\t', usecols=['URL'])
+    df2 = pd.read_csv(file2, sep='\t', usecols=['URL'])
+
+    # Clean URLs: remove quotes, strip whitespace, and convert to lowercase
+    df1['URL'] = df1['URL'].str.replace('"', '', regex=False).str.strip().str.lower()
+    df2['URL'] = df2['URL'].str.strip().str.lower()
+
+    # Find URLs present in file1 but missing in file2
+    missing_urls = df1[~df1['URL'].isin(df2['URL'])]
+
+    # Print the missing URLs
+    if not missing_urls.empty:
+        print(f"URLs that are in {file1} but not in {file2}:")
+        for url in missing_urls['URL']:
+            print(f"- {url}")
+
+        # Write the missing URLs to a new TSV file on the desktop
+        output_file = '/Users/Bishop/Desktop/strange_urls.tsv'
+        missing_urls.to_csv(output_file, sep='\t', index=False)
+
+        # Print the count of missing URLs
+        missing_count = len(missing_urls)
+        print(f"\nTotal missing URLs: {missing_count}")
+        print(f"Missing URLs have been written to: {output_file}")
+    else:
+        print("No missing URLs found.")
+
+# Example usage
+file1 = '/Users/Bishop/Desktop/OCR Data/missing_urls during OCR download.tsv'  # Replace with your first TSV file
+file2 = '/Users/Bishop/Desktop/Missing URL OCR 1800-1899.tsv'  # Replace with your second TSV file
+find_missing_urls(file1, file2)
