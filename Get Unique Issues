@@ -1,0 +1,163 @@
+import requests
+import re
+import pandas as pd
+from bs4 import BeautifulSoup
+import time
+from datetime import datetime, timedelta
+import csv  # Import for handling QUOTE_NONE
+
+# Initial variables for request counting and timing
+request_count = 0
+first_request_time = None
+
+# Record the start time
+start_time = datetime.now()
+
+# Function to send requests with retry logic and rate limit handling
+def send_request_with_retry(url, max_retries=5, backoff_factor=2):
+    global request_count, first_request_time
+
+    # Check if this is the first request and set first_request_time to current moment
+    if request_count == 0:
+        first_request_time = datetime.now()
+
+    # Screen for ChronAm's crawl limit (200 requests per 1 minute)
+    if request_count >= 200:
+        elapsed_time = datetime.now() - first_request_time
+        if elapsed_time < timedelta(minutes=1):
+            print("Crawl limit reached. Waiting for 5 minutes...")
+            time.sleep(300)  # Wait for 5 minutes
+            first_request_time = datetime.now()
+            request_count = 0
+
+    # Check for ChronAm's burst limit (10 requests per 10 seconds)
+    if request_count > 0 and request_count % 10 == 0:
+        print("Burst limit reached. Waiting for 5 seconds...")
+        time.sleep(5)
+
+    for i in range(max_retries):
+        try:
+            response = requests.get(url, timeout=10)
+
+            # Counter for the request count goes up
+            request_count += 1
+            print(f"Request {request_count} made for page {page_num} of issue {issue}")
+
+            # If response code is 200, return the response
+            if response.status_code == 200:
+                return response
+
+            # If a 429 error occurs, handle it with exponential backoff
+            elif response.status_code == 429:
+                print(f"Rate limit exceeded. Received 429 error. Retrying in {backoff_factor ** i} seconds...")
+                time.sleep(backoff_factor ** i)  # Exponential backoff
+
+                # After hitting a 429 error, pause for 5 minutes if retries are exhausted
+                if i == max_retries - 1:
+                    print("Too many retries. Waiting for 5 minutes...")
+                    time.sleep(300)
+
+            # If a 404 error occurs, return None to signal skipping to the next issue
+            elif response.status_code == 404:
+                print(f"Page not found (404): End of issue, moving to next issue... {url}.")
+                return None
+
+            else:
+                print(f"Failed to retrieve {url}: {response.status_code}")
+                return None
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error with {url}: {e}")
+            time.sleep(backoff_factor ** i)  # Exponential backoff
+
+            # After hitting a request exception, pause for 5 minutes if retries are exhausted
+            if i == max_retries - 1:
+                print("Too many retries. Waiting for 5 minutes...")
+                time.sleep(300)
+
+    return None
+
+# Load the CSV file containing unique issues from your desktop
+issues_csv_path = '/Users/Bishop/Desktop/ChronAM URLS/Unique_Issues_1800-1899.csv'
+df_issues = pd.read_csv(issues_csv_path)
+
+# Limit the DataFrame to the first 50,000 rows (adjust as needed)
+df_issues = df_issues.head(50000)
+
+# List to store the OCR data for each page
+ocr_data = []
+
+# Loop over each unique issue
+for idx, row in df_issues.iterrows():
+    issue = row['Unique Issue']
+    # Extract LCCN, date, and edition from the unique issue string
+    match = re.match(r"(.*?)-(\d{4}-\d{2}-\d{2})-ed(\d)", issue)
+    if match:
+        lccn, date, edition = match.groups()
+
+        # Base URL for accessing pages of this issue
+        base_url = f"https://chroniclingamerica.loc.gov/lccn/{lccn}/{date}/ed-{edition}"
+
+        # Assume a typical issue has up to 10 pages (adjust if necessary)
+        page_num = 1
+
+        while True:
+
+            # Construct the URL for the specific page
+            page_url = f"{base_url}/seq-{page_num}/ocr/"
+
+            # Send a request to retrieve the OCR data for this page
+            response = send_request_with_retry(page_url)
+
+            # Check if the request was successful
+            if response:
+                if response.status_code == 200:
+                    # Parse the OCR content
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    ocr_text = soup.get_text(separator='\n', strip=True)
+
+                    # Clean the OCR text to handle any unintended newlines and remove tab characters
+                    ocr_text = re.sub(r'\n+', ' ', ocr_text)  # Replace multiple newlines with a single space
+                    ocr_text = ocr_text.replace('\t', '')  # Remove tab characters
+
+                    # Add the OCR data, along with page and issue details, to the list
+                    ocr_data.append({
+                        'LCCN': lccn,
+                        'Date': date,
+                        'Edition': edition,
+                        'Page': page_num,
+                        'OCR Text': ocr_text
+                    })
+                    page_num += 1  # Increment page number manually
+                elif response.status_code == 404:
+                    # If 404 error is encountered, break out of the page loop and move to the next issue
+                    print(f"Page not found (404): End of issue, moving to next issue... {issue}.")
+                    break
+            else:
+                # If response is None, it means an error occurred
+                print(f"Failed to retrieve page {page_num} for issue {issue}. Moving to next issue.")
+                break
+
+# Create a DataFrame from the OCR data
+df_ocr = pd.DataFrame(ocr_data, columns=['LCCN', 'Date', 'Edition', 'Page', 'OCR Text'])
+
+# Save the DataFrame to a TSV file on your desktop with proper quoting
+output_tsv_path = '/Users/Bishop/Desktop/OCR_Data_First_50k_Issues.tsv'
+df_ocr.to_csv(output_tsv_path, index=False, encoding='utf-8', sep='\t', quotechar='"', quoting=csv.QUOTE_NONE)
+
+# Print the path where the file was saved
+print(f"OCR data for the first 50k issues saved to {output_tsv_path}")
+
+# Optional: Verify the output TSV file manually to ensure columns are correctly aligned
+pd.set_option('display.max_colwidth', 1000)  # Show full column width
+# Set the maximum number of rows to display
+pd.set_option('display.max_rows', None)  # Adjust number as needed
+pd.set_option('display.max_columns', None)
+print(df_ocr.head(1))
+
+# Record the end time and calculate duration
+end_time = datetime.now()
+duration = end_time - start_time
+
+# Print the duration of the script
+print(f"Script finished. Total run time: {duration}")
