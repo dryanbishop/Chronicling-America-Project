@@ -1,0 +1,142 @@
+import requests
+import pandas as pd
+import time
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+import re  # Import re module for regular expressions
+import csv
+
+# Initial variables for request counting and timing
+request_count = 0
+first_request_time = None
+
+# Record the start time
+start_time = datetime.now()
+
+
+# Function to send requests with retry logic and rate limit handling
+def send_request_with_retry(url, max_retries=5, backoff_factor=2):
+    global request_count, first_request_time
+
+    # Check if this is the first request and set first_request_time to current moment
+    if request_count == 0:
+        first_request_time = datetime.now()
+
+    # Screen for rate limits (200 requests per 1 minute)
+    if request_count >= 200:
+        elapsed_time = datetime.now() - first_request_time
+        if elapsed_time < timedelta(minutes=1):
+            print("Crawl limit reached. Waiting for 5 minutes...")
+            time.sleep(300)  # Wait for 5 minutes
+            first_request_time = datetime.now()
+            request_count = 0
+
+    # Check for burst limit (10 requests per 10 seconds)
+    if request_count > 0 and request_count % 10 == 0:
+        print("Burst limit reached. Waiting for 5 seconds...")
+        time.sleep(5)
+
+    for i in range(max_retries):
+        try:
+            response = requests.get(url, timeout=10)
+
+            # Counter for the request count goes up
+            request_count += 1
+            print(f"Request {request_count} made for URL: {url}")
+
+            # If response code is 200, return the response
+            if response.status_code == 200:
+                return response
+
+            # If a 429 error occurs, handle it with exponential backoff
+            elif response.status_code == 429:
+                print(f"Rate limit exceeded. Received 429 error. Retrying in {backoff_factor ** i} seconds...")
+                time.sleep(backoff_factor ** i)  # Exponential backoff
+
+                # After hitting a 429 error, pause for 5 minutes if retries are exhausted
+                if i == max_retries - 1:
+                    print("Too many retries. Waiting for 5 minutes...")
+                    time.sleep(300)
+
+            else:
+                print(f"Failed to retrieve {url}: {response.status_code}")
+                return None
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error with {url}: {e}")
+            time.sleep(backoff_factor ** i)  # Exponential backoff
+
+            # After hitting a request exception, pause for 5 minutes if retries are exhausted
+            if i == max_retries - 1:
+                print("Too many retries. Waiting for 5 minutes...")
+                time.sleep(300)
+
+    return None
+
+
+# Load the CSV file containing URLs and metadata
+urls_csv_path = '/Users/Bishop/Desktop/ChronAm URLs/missing_urls during OCR download.tsv'
+df_urls = pd.read_csv(urls_csv_path)
+
+# List to store the OCR data
+ocr_data = []
+
+# Loop over each URL
+for idx, row in df_urls.iterrows():
+    url = row['URL']
+
+    # Extract metadata from the URL if needed (assuming URL structure includes LCCN and Date)
+    url_parts = url.split('/')
+    lccn = url_parts[4]  # Example: Extract LCCN from the URL
+    date = url_parts[5]  # Example: Extract Date from the URL
+
+    page_num = idx + 1  # Index as page number
+
+    # Send a request to retrieve the OCR data for this page
+    response = send_request_with_retry(url)
+
+    # Check if the request was successful
+    if response:
+        if response.status_code == 200:
+            # Parse the OCR content
+            soup = BeautifulSoup(response.text, 'html.parser')
+            ocr_text = soup.get_text(separator='\n', strip=True)
+
+            # Clean the OCR text to handle any unintended newlines and remove tab characters
+            ocr_text = re.sub(r'\n+', ' ', ocr_text)  # Replace multiple newlines with a single space
+            ocr_text = ocr_text.replace('\t', '')  # Remove tab characters
+
+            # Add the OCR data, along with metadata and page details, to the list
+            ocr_data.append({
+                'URL': url,
+                'LCCN': lccn,
+                'Date': date,
+                'Page': page_num,
+                'OCR Text': ocr_text
+            })
+        else:
+            print(f"Failed to retrieve page for URL {url}. Status code: {response.status_code}")
+    else:
+        print(f"Failed to retrieve page for URL {url}.")
+
+# Create a DataFrame from the OCR data
+df_ocr = pd.DataFrame(ocr_data, columns=['URL', 'LCCN', 'Date', 'Page', 'OCR Text'])
+
+# Save the DataFrame to a TSV file on your desktop with proper quoting
+output_tsv_path = '/Users/Bishop/Desktop/Missing OCR.tsv'
+df_ocr.to_csv(output_tsv_path, index=False, encoding='utf-8', sep='\t', quotechar='"', quoting=csv.QUOTE_NONE)
+
+# Print the path where the file was saved
+print(f"OCR data saved to {output_tsv_path}")
+
+# Optional: Verify the output TSV file manually to ensure columns are correctly aligned
+pd.set_option('display.max_colwidth', 1000)  # Show full column width
+pd.set_option('display.max_rows', None)  # Adjust number as needed
+pd.set_option('display.max_columns', None)
+
+# Record the end time and calculate duration
+end_time = datetime.now()
+duration = end_time - start_time
+
+# Print the duration of the script
+print(f"Script finished. Total run time: {duration}")
