@@ -1,0 +1,148 @@
+import requests
+from bs4 import BeautifulSoup
+import re
+import pandas as pd
+import time
+from datetime import datetime, timedelta
+
+# Base search URL with a placeholder for the page number
+search_url = "https://chroniclingamerica.loc.gov/search/pages/results/list/?state=&date1=1800&date2=1899&proxtext=CHAPTER&x=0&y=0&dateFilterType=yearRange&rows=1000&searchType=basic&page={}"
+
+# Path to save the DataFrame as an Excel file
+output_file_path = "/Users/Bishop/Desktop/URLs.xlsx"
+
+# Regex pattern for ChronAm URLs for specific newspaper pages
+page_pattern = re.compile(r'/lccn/(sn\d+)/(\d{4}-\d{2}-\d{2})/ed-(\d+)/seq-(\d+)/?')
+
+# A shell for our scraped results
+scrape_results = []
+
+# Define rate limit parameters
+burst_limit_window = 60  # 1 minute
+max_requests_per_burst = 20
+crawl_limit_window = 10  # 10 seconds
+max_requests_per_crawl = 20
+
+# Function to send requests with retry logic for handling 429 and 504 errors
+def send_request_with_retry(url, retries=5, backoff_factor=2):
+    global request_count, first_request_time
+
+    # Check if this is the first request and set first_request_time to current time
+    if request_count == 0:
+        first_request_time = datetime.now()
+
+    # Handle ChronAm's crawl limit (200 requests per 1 minute)
+    if request_count >= 200:
+        elapsed_time = datetime.now() - first_request_time
+        if elapsed_time < timedelta(minutes=1):
+            print("Crawl limit reached. Waiting for 5 minutes...")
+            time.sleep(300)  # Wait for 5 minutes
+            first_request_time = datetime.now()
+            request_count = 0
+
+    # Handle ChronAm's burst limit (10 requests per 10 seconds)
+    if request_count > 0 and request_count % 10 == 0:
+        print("Burst limit reached. Waiting for 5 seconds...")
+        time.sleep(5)
+
+    for i in range(retries):
+        try:
+            response = requests.get(url)
+
+            # Counter for the request count
+            request_count += 1
+            print(f"Requests made: {request_count}")
+
+            if response.status_code == 200:
+                return response
+
+            elif response.status_code == 429:
+                print(f"Rate limit exceeded. Received 429 error. Retrying in {backoff_factor ** i} seconds...")
+                time.sleep(backoff_factor ** i)  # Exponential backoff
+
+                if i == retries - 1:
+                    print("Too many retries. Waiting for 5 minutes...")
+                    time.sleep(300)
+
+            elif response.status_code == 504:
+                print(f"Gateway Timeout. Received 504 error. Retrying after 10 seconds...")
+                time.sleep(10)  # Longer delay before retrying
+
+            else:
+                print(f"Failed to retrieve {url}: {response.status_code}")
+                return None
+
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}. Retrying after 10 seconds...")
+            time.sleep(10)  # Delay before retrying
+            retry_delay = min(backoff_factor ** i, 60)  # Exponential backoff
+
+    return None
+
+# Initialize variables for tracking rate limits
+request_count = 0
+first_request_time = None
+
+# To keep track of how long the program takes to run
+start_time = datetime.now()
+
+# Iterate over the pages of your search results
+page_number = 1
+while True:
+    # Construct the URL with the current page number
+    url = search_url.format(page_number)
+
+    # Use the request function to get page content
+    scrape_content = send_request_with_retry(url)
+
+    if scrape_content is None:
+        print(f"Skipping page {page_number} due to repeated errors.")
+        page_number += 1
+        continue
+
+    # Parse the HTML content from scraped_content using BeautifulSoup
+    soup = BeautifulSoup(scrape_content.text, 'lxml')
+
+    # We only want the content with the <ul> label and class 'results_list'
+    results_list = soup.find('ul', class_='results_list')
+
+    if results_list is None:
+        print(f"No results found on page {page_number}")
+        break
+
+    # Find all <a> tags within the results_list that match our regex pattern
+    matching_links = results_list.find_all('a', href=page_pattern)
+
+    # Collect results
+    page_results = []
+    for link in matching_links:
+        link_text = link.get_text(strip=True)
+        match = page_pattern.search(link['href'])
+        if match:
+            matched_href = match.group()
+            link_href = f"https://chroniclingamerica.loc.gov{matched_href}ocr/"
+            page_results.append({'Link Title': link_text, 'URL': link_href})
+
+    if not page_results:
+        print(f"No matching links found on page {page_number}. Ending search.")
+        break
+
+    scrape_results.extend(page_results)
+
+    print(f"Page {page_number} processed.")
+    page_number += 1
+
+    # Delay to prevent overloading the server
+    time.sleep(2)
+
+# Calculate and print the total elapsed time
+end_time = datetime.now()
+total_elapsed_time = end_time - start_time
+print(f"Total elapsed time: {total_elapsed_time}")
+
+# Convert our list of page titles and URLs to a DataFrame
+df = pd.DataFrame(scrape_results)
+
+# Save DataFrame to Excel file
+df.to_excel(output_file_path, index=False)
+print(f"DataFrame has been saved to {output_file_path}.")
